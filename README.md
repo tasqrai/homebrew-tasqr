@@ -1,5 +1,6 @@
 # homebrew-tasqr
 
+[![brew install tasqrai/tasqr/tasqr-mcp](https://img.shields.io/badge/brew%20install-tasqrai%2Ftasqr%2Ftasqr--mcp-informational?logo=homebrew&logoColor=white)](#install)
 [![update formula](https://github.com/tasqrai/homebrew-tasqr/actions/workflows/update-formula.yml/badge.svg)](https://github.com/tasqrai/homebrew-tasqr/actions/workflows/update-formula.yml)
 [![PyPI](https://img.shields.io/pypi/v/tasqr-mcp?label=tasqr-mcp)](https://pypi.org/project/tasqr-mcp/)
 
