@@ -1,0 +1,114 @@
+name: update formula
+
+# Third-party taps get no bump bot, so this is ours. It watches PyPI for a new
+# tasqr-mcp sdist, rebuilds the formula against it, proves the result installs, and
+# pushes to main. Users pick it up on their next `brew update`.
+#
+# It merges without review on purpose. Every release it reacts to has already passed
+# a human gate in tasqr-mcp-python (publishing there needs an explicit Actions run),
+# so a second approval here would only add latency. What review would have caught,
+# check_pure_python.py catches instead: a new dependency with a compiled extension
+# builds fine on this runner, which ships Rust, and then fails for a user who has no
+# toolchain. That check reads PyPI's wheel tags and fails the run before anything is
+# pushed, leaving main on the last known-good formula.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch:
+  # Optional: tasqr-mcp-python can fire this straight after a successful publish
+  # rather than waiting for the weekly run.
+  repository_dispatch:
+    types: [tasqr-mcp-released]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-formula
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.compare.outputs.latest }}
+      current: ${{ steps.compare.outputs.current }}
+      needs_update: ${{ steps.compare.outputs.needs_update }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Cheap on a Linux runner. The macOS job below only starts if this finds
+      # something, so a quiet week costs almost nothing.
+      - id: compare
+        run: |
+          latest=$(curl -fsSL https://pypi.org/pypi/tasqr-mcp/json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          current=$(sed -n 's|.*/tasqr_mcp-\(.*\)\.tar\.gz".*|\1|p' Formula/tasqr-mcp.rb | head -1)
+          if [ -z "$current" ]; then
+            echo "::error::could not read the current version out of the formula"
+            exit 1
+          fi
+          echo "latest=$latest"   >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$latest" = "$current" ]; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "Formula is current at $current."
+          else
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "PyPI has $latest, formula has $current."
+          fi
+
+  update:
+    needs: check
+    if: needs.check.outputs.needs_update == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Homebrew only reads formulae from inside its own tree, and since 6.0 it
+      # refuses untrusted third-party taps outright.
+      - name: Tap this checkout
+        run: |
+          mkdir -p "$(brew --repository)/Library/Taps/tasqrai"
+          ln -s "$PWD" "$(brew --repository)/Library/Taps/tasqrai/homebrew-tasqr"
+          brew trust --tap tasqrai/tasqr
+
+          # The runner image ships aws/tap pre-tapped and untrusted, so every later
+          # brew command prints a tap-trust warning about a tap we never use. Drop it
+          # so a real warning stands out. Tolerate its absence: a future image may not
+          # ship it, and this step runs under `bash -e`.
+          brew untap aws/tap || true
+
+      - name: Point the formula at the new sdist
+        run: python3 .github/scripts/bump_formula.py "${{ needs.check.outputs.latest }}"
+
+      - name: Regenerate resource blocks
+        run: brew update-python-resources tasqrai/tasqr/tasqr-mcp
+
+      # The gate that replaces a human reviewer. Must run before install: this runner
+      # has a Rust toolchain, so a compiled dependency would build green here and
+      # only fail once it reached a user.
+      - name: Check every resource is still pure Python
+        run: python3 .github/scripts/check_pure_python.py
+
+      - name: Audit
+        run: brew audit --strict --online tasqrai/tasqr/tasqr-mcp
+
+      - name: Install and test
+        run: |
+          brew install --formula tasqrai/tasqr/tasqr-mcp
+          brew test tasqrai/tasqr/tasqr-mcp
+
+      - name: Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tasqr-mcp.rb
+          if git diff --cached --quiet; then
+            echo "::error::nothing changed, but PyPI reported a new version"
+            exit 1
+          fi
+          git commit -m "tasqr-mcp ${{ needs.check.outputs.latest }}"
+          git pull --rebase origin main
+          git push origin HEAD:main
